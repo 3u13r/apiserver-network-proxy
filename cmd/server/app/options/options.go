@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/net"
 
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/util"
@@ -86,6 +87,8 @@ type ProxyRunOptions struct {
 	// NOTE that cipher suites are not configurable for TLS1.3,
 	// see: https://pkg.go.dev/crypto/tls#Config, so in that case, this option won't have any effect.
 	CipherSuites string
+
+	NodeCIDR string
 }
 
 func (o *ProxyRunOptions) Flags() *pflag.FlagSet {
@@ -121,6 +124,7 @@ func (o *ProxyRunOptions) Flags() *pflag.FlagSet {
 	flags.StringVar(&o.AuthenticationAudience, "authentication-audience", o.AuthenticationAudience, "Expected agent's token authentication audience (used with agent-namespace, agent-service-account, kubeconfig).")
 	flags.StringVar(&o.ProxyStrategies, "proxy-strategies", o.ProxyStrategies, "The list of proxy strategies used by the server to pick a backend/tunnel, available strategies are: default, destHost.")
 	flags.StringVar(&o.CipherSuites, "cipher-suites", o.CipherSuites, "The comma separated list of allowed cipher suites. Has no effect on TLS1.3. Empty means allow default list.")
+	flags.StringVar(&o.NodeCIDR, "node-cidr", o.NodeCIDR, "NodeCIDR. If set, only api server to node traffic will be strictly proxied directly to the node. Other traffic will be routed via the default route.")
 
 	flags.Bool("warn-on-channel-limit", true, "This behavior is now thread safe and always on. This flag will be removed in a future release.")
 	flags.MarkDeprecated("warn-on-channel-limit", "This behavior is now thread safe and always on. This flag will be removed in a future release.")
@@ -160,6 +164,7 @@ func (o *ProxyRunOptions) Print() {
 	klog.V(1).Infof("KubeconfigBurst set to %d.\n", o.KubeconfigBurst)
 	klog.V(1).Infof("ProxyStrategies set to %q.\n", o.ProxyStrategies)
 	klog.V(1).Infof("CipherSuites set to %q.\n", o.CipherSuites)
+	klog.V(1).Infof("NodeCIDR set to %q.\n", o.NodeCIDR)
 }
 
 func (o *ProxyRunOptions) Validate() error {
@@ -301,6 +306,11 @@ func (o *ProxyRunOptions) Validate() error {
 		}
 	}
 
+	// validate NodeCIDR
+	if o.NodeCIDR != "" && !net.IsIPv4CIDRString(o.NodeCIDR) {
+		return fmt.Errorf("node CIDR %s is not a valid IPv4 CIDR", o.NodeCIDR)
+	}
+
 	return nil
 }
 
@@ -337,6 +347,7 @@ func NewProxyRunOptions() *ProxyRunOptions {
 		AuthenticationAudience:    "",
 		ProxyStrategies:           "default",
 		CipherSuites:              "",
+		NodeCIDR:                  "",
 	}
 	return &o
 }

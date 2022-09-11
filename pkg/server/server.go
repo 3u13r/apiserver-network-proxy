@@ -21,10 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	runpprof "runtime/pprof"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -33,7 +37,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	runpprof "runtime/pprof"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	pkgagent "sigs.k8s.io/apiserver-network-proxy/pkg/agent"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
@@ -147,6 +150,8 @@ type ProxyServer struct {
 	AgentAuthenticationOptions *AgentTokenAuthenticationOptions
 
 	proxyStrategies []ProxyStrategy
+
+	nodeCIDR string
 }
 
 // AgentTokenAuthenticationOptions contains list of parameters required for agent token based authentication
@@ -178,14 +183,42 @@ func (s *ProxyServer) getBackend(reqHost string) (Backend, error) {
 	ctx := genContext(s.proxyStrategies, reqHost)
 	for _, bm := range s.BackendManagers {
 		be, err := bm.Backend(ctx)
-		if err == nil {
-			return be, nil
-		}
-		if ignoreNotFound(err) != nil {
-			// if can't find a backend through current BackendManager, move on
-			// to the next one
+		if _, ok := err.(*ErrNotFound); ok {
+			continue
+		} else if err != nil {
 			return nil, err
 		}
+
+		// we know that a backend has been found
+		// check if it is safe to return the backend
+		if _, ok := bm.(*DefaultRouteBackendManager); ok {
+			// "failed to lookup IP for host \"10.100.137.79:5443\
+			///////////////////////////////////////////////////////
+			network, err := netip.ParsePrefix(s.nodeCIDR)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse node CIDR %q: %v", s.nodeCIDR, err)
+			}
+
+			endpoint := reqHost
+			if parts := strings.Split(reqHost, ":"); len(parts) == 2 {
+				endpoint = parts[0]
+			}
+			ips, err := net.LookupIP(endpoint)
+			if err != nil {
+				return nil, fmt.Errorf("failed to lookup IP for host %q: %v", endpoint, err)
+			}
+			for _, ip := range ips {
+				addr, err := netip.ParseAddr(ip.String())
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse IP %q: %v", ip.String(), err)
+				}
+				if network.Contains(addr) {
+					return be, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
+				}
+			}
+			///////////////////////////////////////////////////////
+		}
+		return be, nil
 	}
 	return nil, &ErrNotFound{}
 }
@@ -328,7 +361,7 @@ func (s *ProxyServer) getFrontendsForBackendConn(agentID string, backend Backend
 }
 
 // NewProxyServer creates a new ProxyServer instance
-func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
+func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, nodeCIDR string, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
 	var bms []BackendManager
 	for _, ps := range proxyStrategies {
 		switch ps {
@@ -353,6 +386,7 @@ func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCoun
 		// use the first backend-manager as the Readiness Manager
 		Readiness:       bms[0],
 		proxyStrategies: proxyStrategies,
+		nodeCIDR:        nodeCIDR,
 	}
 }
 

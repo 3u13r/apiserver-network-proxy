@@ -522,7 +522,6 @@ func TestBasicProxy_HTTPCONN(t *testing.T) {
 	if string(data) != "hello" {
 		t.Errorf("expect %v; got %v", "hello", string(data))
 	}
-
 }
 
 func TestFailedDial_HTTPCONN(t *testing.T) {
@@ -613,7 +612,7 @@ func runGRPCProxyServerWithServerCount(serverCount int) (proxy, *server.ProxySer
 	var err error
 	var lis, lis2 net.Listener
 
-	server := server.NewProxyServer(uuid.New().String(), []server.ProxyStrategy{server.ProxyStrategyDefault}, serverCount, &server.AgentTokenAuthenticationOptions{})
+	server := server.NewProxyServer(uuid.New().String(), []server.ProxyStrategy{server.ProxyStrategyDefault}, serverCount, "", &server.AgentTokenAuthenticationOptions{})
 	grpcServer := grpc.NewServer()
 	agentServer := grpc.NewServer()
 	cleanup := func() {
@@ -652,7 +651,7 @@ func runGRPCProxyServerWithServerCount(serverCount int) (proxy, *server.ProxySer
 func runHTTPConnProxyServer() (proxy, func(), error) {
 	ctx := context.Background()
 	var proxy proxy
-	s := server.NewProxyServer(uuid.New().String(), []server.ProxyStrategy{server.ProxyStrategyDefault}, 0, &server.AgentTokenAuthenticationOptions{})
+	s := server.NewProxyServer(uuid.New().String(), []server.ProxyStrategy{server.ProxyStrategyDefault}, 0, "", &server.AgentTokenAuthenticationOptions{})
 	agentServer := grpc.NewServer()
 
 	agentproto.RegisterAgentServiceServer(agentServer, s)
