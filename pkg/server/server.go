@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -151,7 +150,7 @@ type ProxyServer struct {
 
 	proxyStrategies []ProxyStrategy
 
-	nodeCIDR string
+	nodeCIDR *netip.Prefix
 }
 
 // AgentTokenAuthenticationOptions contains list of parameters required for agent token based authentication
@@ -191,30 +190,21 @@ func (s *ProxyServer) getBackend(reqHost string) (Backend, error) {
 
 		// we know that a backend has been found
 		// check if it is safe to return the backend
-		if _, ok := bm.(*DefaultRouteBackendManager); ok {
+		if _, ok := bm.(*DefaultBackendManager); ok {
 			// "failed to lookup IP for host \"10.100.137.79:5443\
 			///////////////////////////////////////////////////////
-			network, err := netip.ParsePrefix(s.nodeCIDR)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse node CIDR %q: %v", s.nodeCIDR, err)
-			}
-
 			endpoint := reqHost
 			if parts := strings.Split(reqHost, ":"); len(parts) == 2 {
 				endpoint = parts[0]
 			}
-			ips, err := net.LookupIP(endpoint)
+			// nodes can't have DNS records, so if endpoint is not an IP, must be a domain and therefore a service or pod
+			// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#dns-records
+			netipAddr, err := netip.ParseAddr(endpoint)
 			if err != nil {
-				return nil, fmt.Errorf("failed to lookup IP for host %q: %v", endpoint, err)
+				return be, nil
 			}
-			for _, ip := range ips {
-				addr, err := netip.ParseAddr(ip.String())
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse IP %q: %v", ip.String(), err)
-				}
-				if network.Contains(addr) {
-					return be, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
-				}
+			if s.nodeCIDR.Contains(netipAddr) {
+				return nil, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
 			}
 			///////////////////////////////////////////////////////
 		}
@@ -361,7 +351,7 @@ func (s *ProxyServer) getFrontendsForBackendConn(agentID string, backend Backend
 }
 
 // NewProxyServer creates a new ProxyServer instance
-func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, nodeCIDR string, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
+func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, nodeCIDR *netip.Prefix, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
 	var bms []BackendManager
 	for _, ps := range proxyStrategies {
 		switch ps {
@@ -873,6 +863,7 @@ func (s *ProxyServer) serveRecvBackend(backend Backend, stream agent.AgentServic
 	}
 	klog.V(5).InfoS("Close backend of agent", "backend", stream, "serverID", s.serverID, "agentID", agentID)
 }
+
 func (s *ProxyServer) sendCloseRequest(stream agent.AgentService_ConnectServer, connectID int64, random int64, failMsg string) {
 	pkt := &client.Packet{
 		Type: client.PacketType_CLOSE_REQ,

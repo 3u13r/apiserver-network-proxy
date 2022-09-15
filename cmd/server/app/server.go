@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	netpprof "net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -66,8 +67,7 @@ func tlsCipherSuites(cipherNames []string) []uint16 {
 	return ciphersIntSlice
 }
 
-type Proxy struct {
-}
+type Proxy struct{}
 
 type StopFunc func()
 
@@ -112,7 +112,16 @@ func (p *Proxy) run(o *options.ProxyRunOptions) error {
 	if err != nil {
 		return err
 	}
-	server := server.NewProxyServer(o.ServerID, ps, int(o.ServerCount), o.NodeCIDR, authOpt)
+
+	var network *netip.Prefix
+	if o.NodeCIDR != "" {
+		net, err := netip.ParsePrefix(o.NodeCIDR)
+		if err != nil {
+			return fmt.Errorf("failed to parse node CIDR %q: %v", o.NodeCIDR, err)
+		}
+		network = &net
+	}
+	server := server.NewProxyServer(o.ServerID, ps, int(o.ServerCount), network, authOpt)
 
 	frontendStop, err := p.runFrontendServer(ctx, o, server)
 	if err != nil {
@@ -170,7 +179,7 @@ func handleSignals(signalCh chan os.Signal, stopCh chan struct{}) {
 func getUDSListener(ctx context.Context, udsName string) (net.Listener, error) {
 	udsListenerLock.Lock()
 	defer udsListenerLock.Unlock()
-	oldUmask := syscall.Umask(0007)
+	oldUmask := syscall.Umask(0o007)
 	defer syscall.Umask(oldUmask)
 	var lc net.ListenConfig
 	lis, err := lc.Listen(ctx, "unix", udsName)
