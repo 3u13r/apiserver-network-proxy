@@ -190,23 +190,28 @@ func (s *ProxyServer) getBackend(reqHost string) (Backend, error) {
 
 		// we know that a backend has been found
 		// check if it is safe to return the backend
-		if _, ok := bm.(*DefaultBackendManager); ok {
-			// "failed to lookup IP for host \"10.100.137.79:5443\
-			///////////////////////////////////////////////////////
-			endpoint := reqHost
-			if parts := strings.Split(reqHost, ":"); len(parts) == 2 {
-				endpoint = parts[0]
+		if s.nodeCIDR != nil {
+			if _, ok := bm.(*DefaultBackendManager); ok {
+				klog.V(9).Infoln("Testing", reqHost, "against", s.nodeCIDR)
+				// "failed to lookup IP for host \"10.100.137.79:5443\
+				///////////////////////////////////////////////////////
+				endpoint := reqHost
+				if parts := strings.Split(reqHost, ":"); len(parts) == 2 {
+					endpoint = parts[0]
+				}
+				klog.V(9).Infoln("Endpoint:", endpoint)
+				// nodes can't have DNS records, so if endpoint is not an IP, must be a domain and therefore a service or pod
+				// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#dns-records
+				netipAddr, err := netip.ParseAddr(endpoint)
+				if err != nil {
+					return be, nil
+				}
+				if s.nodeCIDR.Contains(netipAddr) {
+					klog.V(9).Infoln("Endpoint", endpoint, "is in node CIDR")
+					return nil, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
+				}
+				///////////////////////////////////////////////////////
 			}
-			// nodes can't have DNS records, so if endpoint is not an IP, must be a domain and therefore a service or pod
-			// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#dns-records
-			netipAddr, err := netip.ParseAddr(endpoint)
-			if err != nil {
-				return be, nil
-			}
-			if s.nodeCIDR.Contains(netipAddr) {
-				return nil, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
-			}
-			///////////////////////////////////////////////////////
 		}
 		return be, nil
 	}
