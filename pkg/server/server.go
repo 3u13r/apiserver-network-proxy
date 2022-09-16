@@ -21,10 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	runpprof "runtime/pprof"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -33,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	runpprof "runtime/pprof"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	pkgagent "sigs.k8s.io/apiserver-network-proxy/pkg/agent"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
@@ -147,6 +149,8 @@ type ProxyServer struct {
 	AgentAuthenticationOptions *AgentTokenAuthenticationOptions
 
 	proxyStrategies []ProxyStrategy
+
+	nodeCIDR *netip.Prefix
 }
 
 // AgentTokenAuthenticationOptions contains list of parameters required for agent token based authentication
@@ -178,14 +182,38 @@ func (s *ProxyServer) getBackend(reqHost string) (Backend, error) {
 	ctx := genContext(s.proxyStrategies, reqHost)
 	for _, bm := range s.BackendManagers {
 		be, err := bm.Backend(ctx)
-		if err == nil {
-			return be, nil
-		}
-		if ignoreNotFound(err) != nil {
-			// if can't find a backend through current BackendManager, move on
-			// to the next one
+		if _, ok := err.(*ErrNotFound); ok {
+			continue
+		} else if err != nil {
 			return nil, err
 		}
+
+		// we know that a backend has been found
+		// check if it is safe to return the backend
+		if s.nodeCIDR != nil {
+			if _, ok := bm.(*DefaultBackendManager); ok {
+				klog.V(9).Infoln("Testing", reqHost, "against", s.nodeCIDR)
+				// "failed to lookup IP for host \"10.100.137.79:5443\
+				///////////////////////////////////////////////////////
+				endpoint := reqHost
+				if parts := strings.Split(reqHost, ":"); len(parts) == 2 {
+					endpoint = parts[0]
+				}
+				klog.V(9).Infoln("Endpoint:", endpoint)
+				// nodes can't have DNS records, so if endpoint is not an IP, must be a domain and therefore a service or pod
+				// https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#dns-records
+				netipAddr, err := netip.ParseAddr(endpoint)
+				if err != nil {
+					return be, nil
+				}
+				if s.nodeCIDR.Contains(netipAddr) {
+					klog.V(9).Infoln("Endpoint", endpoint, "is in node CIDR")
+					return nil, fmt.Errorf("request to %q is for a local IP, not proxying", endpoint)
+				}
+				///////////////////////////////////////////////////////
+			}
+		}
+		return be, nil
 	}
 	return nil, &ErrNotFound{}
 }
@@ -328,7 +356,7 @@ func (s *ProxyServer) getFrontendsForBackendConn(agentID string, backend Backend
 }
 
 // NewProxyServer creates a new ProxyServer instance
-func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
+func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCount int, nodeCIDR *netip.Prefix, agentAuthenticationOptions *AgentTokenAuthenticationOptions) *ProxyServer {
 	var bms []BackendManager
 	for _, ps := range proxyStrategies {
 		switch ps {
@@ -353,6 +381,7 @@ func NewProxyServer(serverID string, proxyStrategies []ProxyStrategy, serverCoun
 		// use the first backend-manager as the Readiness Manager
 		Readiness:       bms[0],
 		proxyStrategies: proxyStrategies,
+		nodeCIDR:        nodeCIDR,
 	}
 }
 
@@ -839,6 +868,7 @@ func (s *ProxyServer) serveRecvBackend(backend Backend, stream agent.AgentServic
 	}
 	klog.V(5).InfoS("Close backend of agent", "backend", stream, "serverID", s.serverID, "agentID", agentID)
 }
+
 func (s *ProxyServer) sendCloseRequest(stream agent.AgentService_ConnectServer, connectID int64, random int64, failMsg string) {
 	pkt := &client.Packet{
 		Type: client.PacketType_CLOSE_REQ,
